@@ -1,7 +1,6 @@
 import atexit
 import logging
 import os
-import signal
 import subprocess
 import sys
 
@@ -42,6 +41,8 @@ class HyperdriveDaemonManager(object):
             '--logfile', logpath,
         ]
 
+        atexit.register(self.stop)
+
     def addresses(self):
         try:
             if not self._addresses:
@@ -59,12 +60,6 @@ class HyperdriveDaemonManager(object):
                    if value and value.get('port'))
 
     def start(self):
-        atexit.register(self.stop)
-
-        signal.signal(signal.SIGABRT, self.stop)
-        signal.signal(signal.SIGTERM, self.stop)
-        signal.signal(signal.SIGINT, self.stop)
-
         self._addresses = None
         self._monitor.start()
         return self._start()

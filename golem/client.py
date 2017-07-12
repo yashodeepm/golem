@@ -39,6 +39,7 @@ from golem.network.p2p.peersession import PeerSessionInfo
 from golem.network.transport.tcpnetwork import SocketAddress
 from golem.ranking.helper.trust import Trust
 from golem.ranking.ranking import Ranking
+from golem.report import Component, Stage, StatePublisher, report_calls
 from golem.resource.base.resourceserver import BaseResourceServer
 from golem.core.async import AsyncRequest, async_run
 from golem.resource.dirmanager import DirManager, DirectoryType
@@ -184,6 +185,7 @@ class Client(HardwarePresetsMixin):
 
     def configure_rpc(self, rpc_session):
         self.rpc_publisher = Publisher(rpc_session)
+        StatePublisher.set_publisher(self.rpc_publisher)
 
     def p2p_listener(self, sender, signal, event='default', **kwargs):
         if event != 'unreachable':
@@ -199,13 +201,12 @@ class Client(HardwarePresetsMixin):
     def sync(self):
         pass
 
+    @report_calls(Component.client, 'start', stage=Stage.pre)
     def start(self):
         if self.use_monitor and not self.monitor:
             self.init_monitor()
         try:
             self.start_network()
-        except SystemExit:
-            raise
         except Exception:
             log.critical('Can\'t start network. Giving up.', exc_info=True)
             sys.exit(1)
@@ -213,6 +214,7 @@ class Client(HardwarePresetsMixin):
         self.do_work_task.start(1, False)
         self.publish_task.start(1, True)
 
+    @report_calls(Component.client, 'stop', stage=Stage.post)
     def stop(self):
         self.stop_network()
         if self.do_work_task.running:
@@ -277,8 +279,14 @@ class Client(HardwarePresetsMixin):
                                            self.monitor.on_peer_snapshot)
                 self.monitor.on_login()
 
+            StatePublisher.publish(Component.client, 'start',
+                                   stage=Stage.post)
+
         def terminate(*exceptions):
             log.error("Golem cannot listen on ports: %s", exceptions)
+            StatePublisher.publish(Component.client, 'start',
+                                   stage=Stage.exception,
+                                   data=[to_unicode(e) for e in exceptions])
             sys.exit(1)
 
         task = Deferred()
@@ -305,6 +313,32 @@ class Client(HardwarePresetsMixin):
         if self.task_server:
             self.task_server.stop_accepting()
             self.task_server.disconnect()
+
+    def pause(self):
+        if self.do_work_task.running:
+            self.do_work_task.stop()
+        if self.publish_task.running:
+            self.publish_task.stop()
+
+        if self.p2pservice:
+            self.p2pservice.pause()
+            self.p2pservice.disconnect()
+        if self.task_server:
+            self.task_server.pause()
+            self.task_server.disconnect()
+            self.task_server.task_computer.quit()
+
+    def resume(self):
+        if not self.do_work_task.running:
+            self.do_work_task.start(1, False)
+        if not self.publish_task.running:
+            self.publish_task.start(1, True)
+
+        if self.p2pservice:
+            self.p2pservice.resume()
+            self.p2pservice.connect_to_network()
+        if self.task_server:
+            self.task_server.resume()
 
     def init_monitor(self):
         metadata = self.__get_nodemetadatamodel()
@@ -335,6 +369,7 @@ class Client(HardwarePresetsMixin):
         )
         self.p2pservice.connect(socket_address)
 
+    @report_calls(Component.client, 'quit', once=True)
     def quit(self):
         self.stop()
 
@@ -365,6 +400,7 @@ class Client(HardwarePresetsMixin):
 
         resource_manager = self.resource_server.resource_manager
         task_manager = self.task_server.task_manager
+        task_manager.add_new_task(task)
 
         task_id = task.header.task_id
         key_id = self.keys_auth.key_id
@@ -373,7 +409,7 @@ class Client(HardwarePresetsMixin):
         files = task.get_resources(None, resource_types["hashes"])
 
         def add_task(_):
-            request = AsyncRequest(task_manager.add_new_task, task)
+            request = AsyncRequest(task_manager.start_task, task_id)
             async_run(request, None, error)
 
         def error(e):
@@ -459,6 +495,9 @@ class Client(HardwarePresetsMixin):
 
     def restart_task(self, task_id):
         self.task_server.task_manager.restart_task(task_id)
+
+    def restart_frame_subtasks(self, task_id, frame):
+        self.task_server.task_manager.restart_frame_subtasks(task_id, frame)
 
     def restart_subtask(self, subtask_id):
         self.task_server.task_manager.restart_subtask(subtask_id)
